@@ -14,6 +14,9 @@ import android.util.Log
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
+
+        com.jarvis.assistant.remote.RemoteAutoConnect.startOnBootIfEnabled(context)
+
         val app = context.applicationContext as com.jarvis.assistant.JarvisApplication
         if (!app.container.securePrefs.backgroundJarvisEnabled) return
         if (Build.VERSION.SDK_INT >= 34) {

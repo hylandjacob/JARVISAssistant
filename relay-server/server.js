@@ -3,10 +3,46 @@ const crypto = require("crypto");
 const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 8787;
-// code -> { device, controller, createdAt, fixed }
+// code -> { device, controller, createdAt, fixed, lastLocation }
 const sessions = new Map();
 
 function code6() { return String(Math.floor(100000 + Math.random() * 900000)); }
+
+// Shown to whoever opens the location-request link. Browsers always show
+// their own native "Allow location access?" prompt before anything is sent -
+// this page cannot skip or hide that, by design of every modern browser.
+// Only send this link to a device/person who has agreed to share it with you.
+const locHtml = (code) => `<!doctype html>
+<html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Share location</title>
+<style>body{background:#02070d;color:#e2e8f0;font-family:sans-serif;text-align:center;margin:0;padding:40px 20px}
+button{margin-top:20px;padding:14px 24px;background:#0ea5e9;color:#02070d;border:none;border-radius:8px;font-size:16px;font-weight:600}
+p{max-width:420px;margin:16px auto;line-height:1.5;color:#94a3b8}
+#status{color:#4ade80;font-weight:600}</style></head>
+<body>
+<h2>Share your location</h2>
+<p>This page asks your browser to share your device's current location. You'll see your browser's own permission prompt first — nothing is sent unless you tap Allow.</p>
+<button onclick="share()">SHARE MY LOCATION</button>
+<p id="status"></p>
+<script>
+function share() {
+  if (!navigator.geolocation) { document.getElementById('status').textContent = 'Not supported on this browser.'; return; }
+  navigator.geolocation.getCurrentPosition(async (pos) => {
+    try {
+      await fetch('/loc?code=${code}', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy })
+      });
+      document.getElementById('status').textContent = 'Location shared. You can close this page.';
+    } catch (e) {
+      document.getElementById('status').textContent = 'Could not send location.';
+    }
+  }, (err) => {
+    document.getElementById('status').textContent = 'Location permission denied or unavailable.';
+  }, { enableHighAccuracy: true, timeout: 15000 });
+}
+</script></body></html>`;
 
 const html = `<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -22,9 +58,12 @@ input{padding:12px;width:170px;text-align:center;text-transform:uppercase}</styl
 <button onclick="cmd('back')">BACK</button><button onclick="cmd('home')">HOME</button>
 <button onclick="cmd('recents')">RECENTS</button><button onclick="swipe('up')">↑</button>
 <button onclick="cmd('wake')" style="background:#0c2b1a;border-color:#4ade80;color:#4ade80">WAKE SCREEN</button>
+<button onclick="cmd('get_location')" style="background:#0c1f2b;border-color:#38bdf8;color:#38bdf8">GET LOCATION</button>
+<button onclick="lockPhone()" style="background:#3a0f0f;border-color:#f87171;color:#f87171">LOCK PHONE</button>
 <button onclick="swipe('down')">↓</button><button onclick="swipe('left')">←</button><button onclick="swipe('right')">→</button><br>
 <button onclick="disconnectRemote()" style="background:#3a0f0f;border-color:#f87171;color:#f87171;margin-top:10px">DISCONNECT</button>
-<p id="status"></p></div>
+<p id="status"></p>
+<p id="locResult"></p></div>
 <script>
 let ws, retryTimer, currentCode, manualStop = false;
 const img = document.getElementById('screen');
@@ -40,6 +79,14 @@ function connect(c) {
       try {
         const m = JSON.parse(e.data);
         if (m.type === 'device') status.textContent = m.online ? 'Phone 1 online - loading screen…' : 'Phone 1 disconnected';
+        else if (m.type === 'location') {
+          const mapsUrl = 'https://www.google.com/maps?q=' + m.lat + ',' + m.lng;
+          document.getElementById('locResult').innerHTML =
+            'Location: ' + m.lat + ', ' + m.lng + (m.accuracy ? ' (±' + Math.round(m.accuracy) + ' m)' : '') +
+            '<br><a href="' + mapsUrl + '" target="_blank" style="color:#38bdf8">Open in Google Maps</a>';
+        }
+        else if (m.type === 'location_error') document.getElementById('locResult').textContent = m.message;
+        else if (m.type === 'locked') status.textContent = m.message || 'Phone locked';
         else status.textContent = m.message || m.type;
       } catch (_) {}
     } else { img.src = URL.createObjectURL(e.data); }
@@ -54,6 +101,11 @@ function connect(c) {
     msg.textContent = 'Not paired yet, retrying…';
     retryTimer = setTimeout(() => connect(c), 3000);
   };
+}
+
+function lockPhone() {
+  if (!confirm('Lock Phone 1 right now?')) return;
+  cmd('lock');
 }
 
 function disconnectRemote() {
@@ -97,10 +149,69 @@ function swipe(d) {
 </script></body></html>`;
 
 const server = http.createServer((req, res) => {
-  if (req.url === "/health") { res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); res.end("ok"); return; }
-  if (req.url === "/" || req.url.startsWith("/?")) {
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  if (url.pathname === "/health") { res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" }); res.end("ok"); return; }
+
+  if (url.pathname === "/loc") {
+    const code = (url.searchParams.get("code") || "").trim().toUpperCase();
+    if (!code) { res.writeHead(400); res.end("Missing code"); return; }
+
+    if (req.method === "GET") {
+      res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+      res.end(locHtml(code));
+      return;
+    }
+
+    if (req.method === "POST") {
+      let body = "";
+      req.on("data", (chunk) => { body += chunk; if (body.length > 4096) req.destroy(); });
+      req.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          const lat = Number(data.lat), lng = Number(data.lng), accuracy = Number(data.accuracy) || null;
+          if (!Number.isFinite(lat) || !Number.isFinite(lng)) { res.writeHead(400); res.end("Bad location"); return; }
+          let s = sessions.get(code);
+          if (!s) { s = { device: null, controller: null, createdAt: Date.now(), fixed: true }; sessions.set(code, s); }
+          s.lastLocation = { lat, lng, accuracy, at: Date.now() };
+          if (s.device && s.device.readyState === WebSocket.OPEN) {
+            s.device.send(JSON.stringify({ type: "location", lat, lng, accuracy, at: s.lastLocation.at }));
+          }
+          res.writeHead(200, { "Content-Type": "application/json" }); res.end("{\"ok\":true}");
+        } catch (_) {
+          res.writeHead(400); res.end("Bad request");
+        }
+      });
+      return;
+    }
+
+    res.writeHead(405); res.end("Method not allowed");
+    return;
+  }
+
+  if (url.pathname === "/loc-view") {
+    const code = (url.searchParams.get("code") || "").trim().toUpperCase();
+    const s = sessions.get(code);
+    const loc = s && s.lastLocation;
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" });
+    if (!loc) {
+      res.end(`<!doctype html><html><body style="background:#02070d;color:#94a3b8;font-family:sans-serif;text-align:center;padding:40px"><h3>No location shared yet for this code.</h3><p>This page refreshes every 10 seconds.</p><script>setTimeout(()=>location.reload(),10000)</script></body></html>`);
+      return;
+    }
+    const mapsUrl = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+    res.end(`<!doctype html><html><body style="background:#02070d;color:#e2e8f0;font-family:sans-serif;text-align:center;padding:40px">
+<h3>Last shared location</h3>
+<p>Lat: ${loc.lat}<br>Lng: ${loc.lng}<br>Accuracy: ${loc.accuracy ? Math.round(loc.accuracy) + ' m' : 'unknown'}<br>At: ${new Date(loc.at).toLocaleString()}</p>
+<a href="${mapsUrl}" style="color:#0ea5e9" target="_blank">Open in Google Maps</a>
+<script>setTimeout(()=>location.reload(),10000)</script>
+</body></html>`);
+    return;
+  }
+
+  if (url.pathname === "/" || url.pathname === "") {
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }); res.end(html); return;
   }
+
   res.writeHead(404); res.end("Not found");
 });
 

@@ -162,7 +162,102 @@ class RemoteControlActivity : ComponentActivity() {
             Spacer(Modifier.height(32.dp))
             HorizontalDivider()
             Spacer(Modifier.height(20.dp))
+            AutoConnectSection(context)
+
+            Spacer(Modifier.height(32.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
+            LocationSection(context, deviceId)
+
+            Spacer(Modifier.height(32.dp))
+            HorizontalDivider()
+            Spacer(Modifier.height(20.dp))
             PrivacySection(context)
+        }
+    }
+
+    /**
+     * Builds a link that, when opened in a browser, asks that browser's own
+     * user for permission to share their current location (a native browser
+     * prompt neither this app nor the linked page can skip or hide). Only
+     * share this link with a device/person who has agreed to share it.
+     */
+    /**
+     * Lets the owner keep JARVIS connected to the relay in the background at
+     * all times (survives app restarts and, when Android allows it, reboots),
+     * so GET LOCATION / LOCK PHONE / WAKE SCREEN work without first pressing
+     * START + SHARE SCREEN. Live screen mirroring itself still always needs
+     * one manual tap on Android's own capture-consent dialog - that step
+     * can never be automated (see the note in RemoteConnectService).
+     */
+    @Composable
+    private fun AutoConnectSection(context: Context) {
+        var enabled by remember { mutableStateOf(RemoteAutoConnect.isEnabled(context)) }
+
+        Text("BACKGROUND AUTO-CONNECT", color = JarvisCyan, fontSize = 16.sp)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "When ON, JARVIS stays connected to the relay in the background so " +
+                "GET LOCATION, LOCK PHONE, and WAKE SCREEN work anytime - without " +
+                "needing to press START + SHARE SCREEN first. Live screen viewing " +
+                "still always needs one manual tap on Android's own permission " +
+                "dialog when you want to watch the screen - Android never allows " +
+                "that specific step to be automated.",
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(if (enabled) "ON" else "OFF", fontSize = 13.sp)
+            Spacer(Modifier.width(10.dp))
+            Switch(checked = enabled, onCheckedChange = {
+                enabled = it
+                RemoteAutoConnect.setEnabled(context, it)
+            })
+        }
+    }
+
+    @Composable
+    private fun LocationSection(context: Context, deviceId: String) {
+        var msg by remember { mutableStateOf("") }
+        val handler = remember { Handler(Looper.getMainLooper()) }
+        var lastLoc by remember { mutableStateOf(RemoteRelayClient.lastLocation) }
+
+        DisposableEffect(Unit) {
+            val poll = object : Runnable {
+                override fun run() { lastLoc = RemoteRelayClient.lastLocation; handler.postDelayed(this, 2000) }
+            }
+            handler.post(poll)
+            onDispose { handler.removeCallbacksAndMessages(null) }
+        }
+
+        Text("LOCATION LINK", color = JarvisCyan, fontSize = 16.sp)
+        Spacer(Modifier.height(10.dp))
+        Text(
+            "Send this link (e.g. via WhatsApp) to the phone whose location you want. " +
+                "Opening it always shows that phone's own browser permission prompt first - " +
+                "nothing is shared unless they tap Allow. Only send this to a device/person who agreed.",
+            fontSize = 11.sp
+        )
+        Spacer(Modifier.height(10.dp))
+        Button(onClick = {
+            val base = BuildConfig.DEFAULT_REMOTE_RELAY_URL.trimEnd('/')
+            msg = if (base.isNotBlank()) {
+                copyToClipboard(context, "JARVIS location link", "$base/loc?code=$deviceId")
+                "Link copied - share it via WhatsApp etc."
+            } else "Relay URL not configured in this APK"
+        }) { Text("COPY LOCATION LINK") }
+        if (msg.isNotBlank()) { Spacer(Modifier.height(6.dp)); Text(msg, fontSize = 12.sp) }
+        Spacer(Modifier.height(14.dp))
+        val loc = lastLoc
+        if (loc == null) {
+            Text("No location has been shared back yet.", fontSize = 11.sp)
+        } else {
+            Text(
+                "Last shared location:\nLat ${loc.lat}, Lng ${loc.lng}" +
+                    (loc.accuracy?.let { " (±${it.toInt()} m)" } ?: "") +
+                    "\n${java.text.DateFormat.getDateTimeInstance().format(java.util.Date(loc.at))}",
+                fontSize = 12.sp
+            )
         }
     }
 

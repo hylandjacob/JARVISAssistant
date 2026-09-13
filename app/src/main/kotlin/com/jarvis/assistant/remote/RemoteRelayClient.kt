@@ -1,9 +1,14 @@
 package com.jarvis.assistant.remote
 
+import android.app.admin.DevicePolicyManager
 import android.content.Context
+import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Handler
 import android.os.Looper
+import androidx.core.content.ContextCompat
 import com.jarvis.assistant.BuildConfig
+import com.jarvis.assistant.security.AppLock
 import okhttp3.*
 import okio.ByteString
 import org.json.JSONObject
@@ -34,7 +39,11 @@ object RemoteRelayClient {
         private set
     @Volatile var connectedToServer: Boolean = false
         private set
+    @Volatile var lastLocation: LocationInfo? = null
+        private set
     @Volatile var relayUrl: String = BuildConfig.DEFAULT_REMOTE_RELAY_URL
+
+    data class LocationInfo(val lat: Double, val lng: Double, val accuracy: Double?, val at: Long)
 
     private val client = OkHttpClient.Builder()
         .readTimeout(0, TimeUnit.MILLISECONDS)
@@ -72,6 +81,11 @@ object RemoteRelayClient {
                         "session" -> pairingCode = o.optString("code").ifBlank { pairingCode }
                         "controller" -> controllerConnected = o.optBoolean("connected")
                         "paired" -> controllerConnected = true
+                        "location" -> lastLocation = LocationInfo(
+                            o.optDouble("lat"), o.optDouble("lng"),
+                            if (o.has("accuracy") && !o.isNull("accuracy")) o.optDouble("accuracy") else null,
+                            o.optLong("at", System.currentTimeMillis())
+                        )
                         "cmd" -> handleCommand(o)
                     }
                 } catch (_: Exception) {}
@@ -110,9 +124,10 @@ object RemoteRelayClient {
     }
 
     private fun handleCommand(o: JSONObject) {
-        if (o.optString("cmd") == "wake") {
-            wakeScreen()
-            return
+        when (o.optString("cmd")) {
+            "wake" -> { wakeScreen(); return }
+            "get_location" -> { sendCurrentLocation(); return }
+            "lock" -> { lockPhone(); return }
         }
         val svc = com.jarvis.assistant.accessibility.JarvisAccessibilityService.current() ?: return
         when (o.optString("cmd")) {
@@ -123,6 +138,66 @@ object RemoteRelayClient {
             "back" -> svc.remoteBack()
             "home" -> svc.remoteHome()
             "recents" -> svc.remoteRecents()
+        }
+    }
+
+    /**
+     * Reads the phone's last known location (no new browser/user click needed -
+     * this uses the location permission granted ahead of time in the app itself)
+     * and sends it back over the already-open connection to whoever is
+     * currently controlling this session.
+     */
+    private fun sendCurrentLocation() {
+        val ctx = appContext ?: return
+        val fine = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        val coarse = ContextCompat.checkSelfPermission(ctx, android.Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+        if (!fine && !coarse) {
+            ws?.send("""{"type":"location_error","message":"Location permission not granted on this phone"}""")
+            return
+        }
+        try {
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as LocationManager
+            val providers = lm.getProviders(true)
+            val best = providers.mapNotNull { p -> try { lm.getLastKnownLocation(p) } catch (_: SecurityException) { null } }
+                .maxByOrNull { it.time }
+            if (best == null) {
+                ws?.send("""{"type":"location_error","message":"No last known location available yet"}""")
+                return
+            }
+            ws?.send(
+                JSONObject().apply {
+                    put("type", "location")
+                    put("lat", best.latitude)
+                    put("lng", best.longitude)
+                    put("accuracy", best.accuracy)
+                    put("at", best.time)
+                }.toString()
+            )
+        } catch (_: Exception) {
+            ws?.send("""{"type":"location_error","message":"Could not read location"}""")
+        }
+    }
+
+    /**
+     * Locks the screen immediately using whatever screen lock is already
+     * configured on the phone (PIN/pattern/password/biometric). Requires
+     * this app to already be an active Device Admin (see AppLock /
+     * UNINSTALL PROTECTION). If no secure lock is set up on the phone, this
+     * only turns the screen off - it does not create a new password itself
+     * (Android has not allowed regular apps to do that since Android 8).
+     */
+    private fun lockPhone() {
+        val ctx = appContext ?: return
+        try {
+            val dpm = ctx.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
+            if (dpm.isAdminActive(AppLock.deviceAdminComponent(ctx))) {
+                dpm.lockNow()
+                ws?.send("""{"type":"locked","message":"Phone locked"}""")
+            } else {
+                ws?.send("""{"type":"location_error","message":"Enable Uninstall Protection (Device Admin) in the app first to allow remote lock"}""")
+            }
+        } catch (_: Exception) {
+            ws?.send("""{"type":"location_error","message":"Could not lock the phone"}""")
         }
     }
 

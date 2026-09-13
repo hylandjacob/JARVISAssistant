@@ -24,5 +24,9 @@ class JarvisApplication : Application() {
         CoroutineScope(Dispatchers.IO).launch {
             container.knowledgeRepository.ensureSeeded()
         }
+
+        if (com.jarvis.assistant.remote.RemoteAutoConnect.isEnabled(this)) {
+            com.jarvis.assistant.remote.RemoteAutoConnect.start(this)
+        }
     }
 }
