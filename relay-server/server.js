@@ -47,105 +47,154 @@ function share() {
 const html = `<!doctype html>
 <html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>JARVIS Remote</title>
-<style>body{background:#02070d;color:#38bdf8;font-family:monospace;text-align:center;margin:20px}
-#screen{max-width:96vw;max-height:72vh;border:1px solid #38bdf8;touch-action:none}
-button{margin:5px;padding:12px;background:#06131c;color:#38bdf8;border:1px solid #38bdf8;border-radius:6px}
-input{padding:12px;width:170px;text-align:center;text-transform:uppercase}</style></head>
-<body><h2>JARVIS REMOTE</h2>
-<div id="login"><input id="code" inputmode="text" maxlength="16" placeholder="Device code">
-<button onclick="manualPair()">PAIR</button><p id="msg"></p></div>
-<div id="ctrl" style="display:none"><img id="screen"><br>
-<button onclick="cmd('back')">BACK</button><button onclick="cmd('home')">HOME</button>
-<button onclick="cmd('recents')">RECENTS</button><button onclick="swipe('up')">↑</button>
-<button onclick="cmd('wake')" style="background:#0c2b1a;border-color:#4ade80;color:#4ade80">WAKE SCREEN</button>
-<button onclick="cmd('get_location')" style="background:#0c1f2b;border-color:#38bdf8;color:#38bdf8">GET LOCATION</button>
-<button onclick="lockPhone()" style="background:#3a0f0f;border-color:#f87171;color:#f87171">LOCK PHONE</button>
-<button onclick="swipe('down')">↓</button><button onclick="swipe('left')">←</button><button onclick="swipe('right')">→</button><br>
-<button onclick="disconnectRemote()" style="background:#3a0f0f;border-color:#f87171;color:#f87171;margin-top:10px">DISCONNECT</button>
-<p id="status"></p>
-<p id="locResult"></p></div>
+<style>
+body{background:#02070d;color:#38bdf8;font-family:monospace;text-align:center;margin:20px}
+.device{border:1px solid #164e63;border-radius:10px;padding:14px;margin:0 auto 24px;max-width:96vw;display:inline-block;vertical-align:top}
+.devices-row{display:flex;flex-wrap:wrap;justify-content:center;gap:16px}
+.device img{max-width:92vw;max-height:60vh;border:1px solid #38bdf8;touch-action:none;display:block;margin:0 auto}
+button{margin:5px;padding:10px;background:#06131c;color:#38bdf8;border:1px solid #38bdf8;border-radius:6px}
+input{padding:10px;width:160px;text-align:center;text-transform:uppercase}
+.status{font-size:13px}
+.addBox{margin-top:10px}
+</style></head>
+<body>
+<h2>JARVIS REMOTE</h2>
+<div id="devices" class="devices-row"></div>
+<div class="addBox">
+  <input id="newCode" inputmode="text" maxlength="16" placeholder="Device code">
+  <button onclick="addFromInput()">+ ADD DEVICE</button>
+</div>
 <script>
-let ws, retryTimer, currentCode, manualStop = false;
-const img = document.getElementById('screen');
+const devicesEl = document.getElementById('devices');
+let panelCount = 0;
 
-function connect(c) {
-  clearTimeout(retryTimer);
-  currentCode = c;
-  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/control?code=' + encodeURIComponent(c));
-  ws.binaryType = 'blob';
-  ws.onopen = () => { login.style.display = 'none'; ctrl.style.display = 'block'; status.textContent = 'Connected'; msg.textContent = ''; };
-  ws.onmessage = e => {
-    if (typeof e.data === 'string') {
-      try {
-        const m = JSON.parse(e.data);
-        if (m.type === 'device') status.textContent = m.online ? 'Phone 1 online - loading screen…' : 'Phone 1 disconnected';
-        else if (m.type === 'location') {
-          const mapsUrl = 'https://www.google.com/maps?q=' + m.lat + ',' + m.lng;
-          document.getElementById('locResult').innerHTML =
-            'Location: ' + m.lat + ', ' + m.lng + (m.accuracy ? ' (±' + Math.round(m.accuracy) + ' m)' : '') +
-            '<br><a href="' + mapsUrl + '" target="_blank" style="color:#38bdf8">Open in Google Maps</a>';
-        }
-        else if (m.type === 'location_error') document.getElementById('locResult').textContent = m.message;
-        else if (m.type === 'locked') status.textContent = m.message || 'Phone locked';
-        else status.textContent = m.message || m.type;
-      } catch (_) {}
-    } else { img.src = URL.createObjectURL(e.data); }
-  };
-  ws.onclose = () => {
-    if (manualStop) { status.textContent = 'Disconnected'; return; }
-    status.textContent = 'Disconnected - retrying…';
-    retryTimer = setTimeout(() => connect(c), 3000);
-  };
-  ws.onerror = () => {
-    if (manualStop) return;
-    msg.textContent = 'Not paired yet, retrying…';
-    retryTimer = setTimeout(() => connect(c), 3000);
-  };
-}
-
-function lockPhone() {
-  if (!confirm('Lock Phone 1 right now?')) return;
-  cmd('lock');
-}
-
-function disconnectRemote() {
-  manualStop = true;
-  clearTimeout(retryTimer);
-  if (ws) { try { ws.close(); } catch (_) {} }
-  ctrl.style.display = 'none';
-  login.style.display = 'block';
-  msg.textContent = '';
-  history.replaceState(null, '', location.pathname);
-}
-
-function manualPair() {
-  manualStop = false;
-  const c = document.getElementById('code').value.trim();
+function addFromInput() {
+  const c = document.getElementById('newCode').value.trim();
   if (!c) return;
-  history.replaceState(null, '', '?code=' + encodeURIComponent(c));
-  connect(c);
+  document.getElementById('newCode').value = '';
+  addDevicePanel(c);
+  syncUrl();
 }
 
-// Auto-pair straight from a saved/bookmarked link like ?code=XXXXXXXX
+function syncUrl() {
+  const codes = Array.from(devicesEl.querySelectorAll('[data-code]')).map(el => el.getAttribute('data-code'));
+  const params = new URLSearchParams();
+  codes.forEach(c => params.append('code', c));
+  history.replaceState(null, '', codes.length ? ('?' + params.toString()) : location.pathname);
+}
+
+function addDevicePanel(initialCode) {
+  panelCount++;
+  const id = 'dev' + panelCount;
+  const el = document.createElement('div');
+  el.className = 'device';
+  el.setAttribute('data-code', initialCode.toUpperCase());
+  el.innerHTML =
+    '<div><input class="codeInput" value="' + initialCode.toUpperCase() + '" maxlength="16">' +
+    '<button class="pairBtn">PAIR</button>' +
+    '<button class="removeBtn" style="background:#3a0f0f;border-color:#f87171;color:#f87171">REMOVE</button></div>' +
+    '<img class="screen">' +
+    '<div>' +
+    '<button class="back">BACK</button><button class="home">HOME</button><button class="recents">RECENTS</button><button class="up">↑</button>' +
+    '<button class="wake" style="background:#0c2b1a;border-color:#4ade80;color:#4ade80">WAKE</button>' +
+    '<button class="loc" style="background:#0c1f2b;border-color:#38bdf8;color:#38bdf8">LOCATION</button>' +
+    '<button class="lock" style="background:#3a0f0f;border-color:#f87171;color:#f87171">LOCK</button>' +
+    '<br><button class="down">↓</button><button class="left">←</button><button class="right">→</button>' +
+    '</div>' +
+    '<p class="status status">Connecting…</p>' +
+    '<p class="locResult status"></p>';
+  devicesEl.appendChild(el);
+
+  const img = el.querySelector('.screen');
+  const statusEl = el.querySelector('.status');
+  const locResultEl = el.querySelector('.locResult');
+  const codeInput = el.querySelector('.codeInput');
+
+  let ws, retryTimer, manualStop = false, currentCode = initialCode.toUpperCase();
+
+  function connect(c) {
+    clearTimeout(retryTimer);
+    currentCode = c.toUpperCase();
+    el.setAttribute('data-code', currentCode);
+    ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/control?code=' + encodeURIComponent(currentCode));
+    ws.binaryType = 'blob';
+    ws.onopen = () => { statusEl.textContent = 'Connected'; };
+    ws.onmessage = e => {
+      if (typeof e.data === 'string') {
+        try {
+          const m = JSON.parse(e.data);
+          if (m.type === 'device') statusEl.textContent = m.online ? 'Online - loading screen…' : 'Phone disconnected';
+          else if (m.type === 'location') {
+            const mapsUrl = 'https://www.google.com/maps?q=' + m.lat + ',' + m.lng;
+            locResultEl.innerHTML = 'Loc: ' + m.lat + ', ' + m.lng + (m.accuracy ? ' (±' + Math.round(m.accuracy) + ' m)' : '') +
+              ' <a href="' + mapsUrl + '" target="_blank" style="color:#38bdf8">Map</a>';
+          }
+          else if (m.type === 'location_error') locResultEl.textContent = m.message;
+          else if (m.type === 'locked') statusEl.textContent = m.message || 'Phone locked';
+          else statusEl.textContent = m.message || m.type;
+        } catch (_) {}
+      } else { img.src = URL.createObjectURL(e.data); }
+    };
+    ws.onclose = () => {
+      if (manualStop) { statusEl.textContent = 'Disconnected'; return; }
+      statusEl.textContent = 'Disconnected - retrying…';
+      retryTimer = setTimeout(() => connect(currentCode), 3000);
+    };
+    ws.onerror = () => {
+      if (manualStop) return;
+      statusEl.textContent = 'Not paired yet, retrying…';
+      retryTimer = setTimeout(() => connect(currentCode), 3000);
+    };
+  }
+
+  function cmd(c) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: c })); }
+  function tap(e) {
+    const r = img.getBoundingClientRect();
+    const x = (e.clientX - r.left) * img.naturalWidth / r.width;
+    const y = (e.clientY - r.top) * img.naturalHeight / r.height;
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: 'tap', x, y }));
+  }
+  function swipe(d) {
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const a = { up: [w/2,h*.75,w/2,h*.25], down: [w/2,h*.25,w/2,h*.75], left: [w*.8,h/2,w*.2,h/2], right: [w*.2,h/2,w*.8,h/2] }[d];
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: 'swipe', x1: a[0], y1: a[1], x2: a[2], y2: a[3] }));
+  }
+
+  img.addEventListener('pointerup', tap);
+  el.querySelector('.back').addEventListener('click', () => cmd('back'));
+  el.querySelector('.home').addEventListener('click', () => cmd('home'));
+  el.querySelector('.recents').addEventListener('click', () => cmd('recents'));
+  el.querySelector('.wake').addEventListener('click', () => cmd('wake'));
+  el.querySelector('.loc').addEventListener('click', () => cmd('get_location'));
+  el.querySelector('.lock').addEventListener('click', () => { if (confirm('Lock this phone right now?')) cmd('lock'); });
+  el.querySelector('.up').addEventListener('click', () => swipe('up'));
+  el.querySelector('.down').addEventListener('click', () => swipe('down'));
+  el.querySelector('.left').addEventListener('click', () => swipe('left'));
+  el.querySelector('.right').addEventListener('click', () => swipe('right'));
+  el.querySelector('.pairBtn').addEventListener('click', () => {
+    manualStop = false;
+    const c = codeInput.value.trim();
+    if (!c) return;
+    connect(c);
+    syncUrl();
+  });
+  el.querySelector('.removeBtn').addEventListener('click', () => {
+    manualStop = true;
+    clearTimeout(retryTimer);
+    if (ws) { try { ws.close(); } catch (_) {} }
+    el.remove();
+    syncUrl();
+  });
+
+  connect(currentCode);
+}
+
+// Auto-pair every code in the URL, e.g. a saved link with ?code=AAA&code=BBB
 window.addEventListener('load', () => {
   const p = new URLSearchParams(location.search);
-  const c = p.get('code') || p.get('id');
-  if (c) { document.getElementById('code').value = c; manualPair(); }
+  const codes = p.getAll('code').concat(p.getAll('id')).filter(Boolean);
+  codes.forEach(c => addDevicePanel(c));
 });
-
-function cmd(c) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: c })); }
-function tap(e) {
-  const r = img.getBoundingClientRect();
-  const x = (e.clientX - r.left) * img.naturalWidth / r.width;
-  const y = (e.clientY - r.top) * img.naturalHeight / r.height;
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: 'tap', x, y }));
-}
-img.addEventListener('pointerup', tap);
-function swipe(d) {
-  const w = img.naturalWidth, h = img.naturalHeight;
-  const a = { up: [w/2,h*.75,w/2,h*.25], down: [w/2,h*.25,w/2,h*.75], left: [w*.8,h/2,w*.2,h/2], right: [w*.2,h/2,w*.8,h/2] }[d];
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cmd', cmd: 'swipe', x1: a[0], y1: a[1], x2: a[2], y2: a[3] }));
-}
 </script></body></html>`;
 
 const server = http.createServer((req, res) => {
