@@ -254,9 +254,15 @@ wss.on("connection", (ws, req) => {
   ws.send(JSON.stringify({ type: "session", code }));
 
   ws.on("message", (data, isBinary) => {
+    const s = sessions.get(code);
+    if (!s || !s.controller || s.controller.readyState !== WebSocket.OPEN) return;
     if (isBinary) {
-      const s = sessions.get(code);
-      if (s && s.controller && s.controller.readyState === WebSocket.OPEN) s.controller.send(data, { binary: true });
+      s.controller.send(data, { binary: true });
+    } else {
+      // Text replies from the device (location results, lock confirmation,
+      // errors) - this was missing before, so GET LOCATION / LOCK PHONE
+      // silently did nothing visible on the controller page.
+      s.controller.send(data.toString());
     }
   });
 
