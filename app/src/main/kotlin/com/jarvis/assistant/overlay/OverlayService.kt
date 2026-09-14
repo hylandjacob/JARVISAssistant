@@ -30,7 +30,7 @@ import com.jarvis.assistant.voice.JarvisGlobalState
 import com.jarvis.assistant.voice.SpeechEvent
 import com.jarvis.assistant.voice.VoiceState
 import com.rementia.openwakeword.lib.WakeWordEngine
-import com.rementia.openwakeword.lib.WakeWordModel
+import com.rementia.openwakeword.lib.model.WakeWordModel
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
